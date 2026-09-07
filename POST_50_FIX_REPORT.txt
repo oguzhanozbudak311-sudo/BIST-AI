@@ -1,0 +1,27 @@
+BIST AI - 50 HISSE SONRASI DUZELTME RAPORU
+Tarih: 2026-09-06
+
+Uygulanan kritik duzeltmeler:
+1) Eksik degerleme carpani ceza/tavan sistemi eklendi.
+   - Tek/iki carpana gore 100/100'e sisirme engellendi.
+   - valuation_coverage panelde gosterilir.
+2) Onceki ayni donem KAP raporu yoksa sistem artik tum analizi durdurmaz.
+   - Cari raporun karsilastirmali sutunu buyume icin kullanilir.
+   - Onceki ozkaynak yoksa ROE eksik kalir ve veri kalite uyarisi verilir.
+3) Cari yil KAP raporu yoksa en guncel kullanilabilir rapor stale fallback olarak secilir.
+   - Panel acikca eski veri uyarisi verir; veri uydurulmaz.
+4) KAP parser olcek/satir anomalileri icin konservatif veri kalite kontrolleri eklendi.
+   - THYAO/AKCNS/EUPWR tipi supheli oranlar sessizce guvenilir kabul edilmez.
+5) TAS uyarilari eklendi.
+   - TAS yuksek + Risk/Reward cok dusuk: direnc yakinligi uyarisi.
+   - Risk/Reward cok yuksek + TAS zayif: destek yakinligi tek basina teyit degildir uyarisi.
+6) 50 hisse evreni korunmustur.
+
+Testler:
+- python -m py_compile *.py : BASARILI
+- regression_test.py: 4/4 BASARILI
+- self_test.py: 50/50 FSS + 50/50 TAS BASARILI
+
+Not:
+Canli KAP/Is Yatirim/Yahoo veri kaynaklari calisma aninda internet gerektirir.
+Offline testler motor mantigi ve 50-hisse entegrasyonunu test eder; canli veri dogrulamasinin yerini tutmaz.

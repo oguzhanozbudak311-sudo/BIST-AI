@@ -1,0 +1,18 @@
+BIST AI FINAL PARSER FIX REPORT
+Build: 2026-09-07
+Surum: FSS V3.1.3 + TAS V2
+
+DUZELTMELER
+1) THYAO: KAP milyon TL sunumunda dipnot referansinin finansal deger sanilmasi engellendi.
+   Test fixture sonucu: Hasilat 585.069 mlr TL, Esas Faaliyet Kari -5.098 mlr TL, Net Kar 18.864 mlr TL, Ozkaynak 1.018453 trl TL.
+2) AKCNS: KAP 1.000 TL sunumunda tek nokta binlik ayrac olarak parse ediliyor.
+   Test fixture sonucu: Hasilat 13.670 mlr TL, Esas Faaliyet Kari -362.003 mn TL, Net Kar -96.377 mn TL, Ozkaynak 28.530 mlr TL.
+3) FSS guvenlik kapisi korundu. Kalite ana faktoru hesaplanamiyorsa karar FSS/Genel Skor kullanilmaz; ham skor inceleme icin korunur.
+4) KAYSE stale-report ve DOFRB eksik-carpan davranislarina dokunulmadi.
+
+TESTLER
+- parser_hotfix_test.py: THYAO + AKCNS 2/2 BASARILI
+- regression_test.py: FROTO/TOASO/TTRAK/TUPRS 4/4 BASARILI
+- safety_gate_tests: THYAO/AKCNS/KAYSE BASARILI
+- self_test.py: 50/50 hisse evreni, 50/50 FSS, 50/50 TAS BASARILI
+- py_compile: BASARILI

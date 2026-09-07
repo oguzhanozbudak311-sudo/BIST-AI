@@ -1,0 +1,40 @@
+BIST AI FINAL 50 - TEST RAPORU
+================================
+Build: 2026-09-06
+
+1) Python syntax / compile
+   SONUC: BASARILI
+   Kapsam: app.py, universe.py, financial_data_engine.py, isyatirim_engine.py,
+           fss_v3_engine.py, tas_engine.py, self_test.py, regression_test.py
+
+2) 50-hisse evren kontrolu
+   SONUC: 50/50 BASARILI
+   - 50 benzersiz kod
+   - buyuk harf/alphanumeric ticker formati
+   - Yahoo ticker donusumu .IS
+
+3) FSS V3.1 offline back-test
+   SONUC: 50/50 BASARILI
+   - farkli sektor profilleri
+   - buyume/daralma/zarar/net nakit senaryolari
+   - 0-100 skor siniri
+   - value-trap Yok/Orta/Yuksek mantigi
+
+4) TAS V2 offline back-test
+   SONUC: 50/50 BASARILI
+   - sentetik 420 is gunu OHLCV
+   - MA20/50/200, RSI, ATR, RVOL, destek/direnc, risk/reward akisi
+   - 0-100 TAS skoru
+
+5) Canli-dogrulanmis FSS regresyon fixture testi
+   SONUC: 4/4 BASARILI
+   FROTO : 57.8 | value-trap Orta
+   TOASO : 80.1 | value-trap Yok
+   TTRAK : 45.0 | value-trap Yuksek
+   TUPRS : 76.6 | value-trap Yok
+
+6) Canli veri siniri
+   Bu paket olusturulurken model calisma ortaminda KAP / Is Yatirim / Yahoo Finance
+   canli endpointlerine guvenilir erisim yoktur. Bu nedenle kalan 46 hissenin o andaki
+   canli HTML/API cevabi burada dogrudan dogrulanamaz. Program ayni otomatik, ticker-
+   bagimsiz motoru kullanir; ag/kaynak degisiklikleri olursa panel ilgili hatayi gosterir.
