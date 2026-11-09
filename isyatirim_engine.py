@@ -1,5 +1,6 @@
 import re
 import numbers
+import time
 from functools import lru_cache
 from io import StringIO
 
@@ -76,11 +77,30 @@ def find_column(columns, candidates):
     return None
 
 
-@lru_cache(maxsize=256)
-def get_html(url):
-    r = SESSION.get(url, timeout=30)
-    r.raise_for_status()
-    return r.text
+def _request_html(url, timeout=30, retries=3):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            r = SESSION.get(url, timeout=timeout)
+            r.raise_for_status()
+            return r.text
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.8 * (attempt + 1))
+    raise last_error
+
+
+@lru_cache(maxsize=64)
+def _get_html_cached(url, bucket):
+    return _request_html(url)
+
+
+def get_html(url, ttl_seconds=300, force_refresh=False):
+    """HTML getir. Fiyat/çarpan sayfalarında sonsuz cache kullanma."""
+    if force_refresh:
+        return _request_html(url)
+    bucket = int(time.time() // max(1, ttl_seconds))
+    return _get_html_cached(url, bucket)
 
 
 def read_tables(html):
@@ -110,6 +130,32 @@ def find_ratio_table(tables):
     return None
 
 
+
+
+def kapanis_fiyati_bul(tables, hisse):
+    """Şirket kartındaki farklı tablo şablonlarından kapanış fiyatını bul."""
+    hisse = hisse.upper().strip()
+    for raw in tables:
+        t = raw.copy()
+        t.columns = [flatten_column(x) for x in t.columns]
+        close_col = find_column(t.columns, ["Kapanış", "Kapanis", "Son Fiyat", "Fiyat"])
+        if close_col is None:
+            continue
+        code_col = find_column(t.columns, ["Kod", "Hisse Kodu", "Hisse"])
+        row = None
+        if code_col is not None:
+            codes = t[code_col].astype(str).str.upper().str.strip()
+            rows = t[codes == hisse]
+            if not rows.empty:
+                row = rows.iloc[0]
+        elif len(t) == 1:
+            row = t.iloc[0]
+        if row is not None:
+            value = tr_float(row[close_col])
+            if value is not None and value > 0:
+                return value
+    return None
+
 def find_stock_row(table, hisse):
     kod_col = find_column(table.columns, ["Kod"])
     if kod_col is None:
@@ -119,14 +165,25 @@ def find_stock_row(table, hisse):
     return None if rows.empty else rows.iloc[0]
 
 
-@lru_cache(maxsize=1)
-def ana_sayfa_verileri():
-    html = get_html(BASE_URL)
+@lru_cache(maxsize=8)
+def _ana_sayfa_verileri_cached(bucket):
+    html = get_html(BASE_URL, ttl_seconds=300)
     tables = read_tables(html)
     summary = find_summary_table(tables)
     if summary is None:
         raise ValueError("İş Yatırım ana sektör tablosu bulunamadı.")
     return {"html": html, "summary": summary}
+
+
+def ana_sayfa_verileri(force_refresh=False):
+    if force_refresh:
+        html = get_html(BASE_URL, force_refresh=True)
+        tables = read_tables(html)
+        summary = find_summary_table(tables)
+        if summary is None:
+            raise ValueError("İş Yatırım ana sektör tablosu bulunamadı.")
+        return {"html": html, "summary": summary}
+    return _ana_sayfa_verileri_cached(int(time.time() // 300))
 
 
 @lru_cache(maxsize=256)
@@ -145,10 +202,10 @@ def hisse_meta_getir(hisse):
     }
 
 
-@lru_cache(maxsize=256)
-def sirket_oranlari_getir(hisse):
+@lru_cache(maxsize=512)
+def _sirket_oranlari_cached(hisse, bucket):
     hisse = hisse.upper().strip()
-    html = get_html(COMPANY_CARD_URL.format(hisse=hisse))
+    html = get_html(COMPANY_CARD_URL.format(hisse=hisse), ttl_seconds=120)
     table = find_ratio_table(read_tables(html))
     if table is None:
         raise ValueError(f"{hisse} şirket kartında gerçekleşen oran tablosu bulunamadı.")
@@ -158,17 +215,47 @@ def sirket_oranlari_getir(hisse):
     def val(cands):
         c = find_column(table.columns, cands)
         return tr_float(row[c]) if c is not None else None
+    close = val(["Kapanış", "Kapanis"])
+    if close is None:
+        close = kapanis_fiyati_bul(read_tables(html), hisse)
     return {
         "fk": val(["F/K"]),
         "fd_favok": val(["FD/FAVÖK", "FD/FAVOK"]),
         "fd_satislar": val(["FD/Satışlar", "FD/Satislar"]),
         "pddd": val(["PD/DD"]),
-        "kapanis": val(["Kapanış", "Kapanis"]),
+        "kapanis": close,
         "son_donem": str(row[find_column(table.columns, ["Son Dönem", "Son Donem"])]) if find_column(table.columns, ["Son Dönem", "Son Donem"]) is not None else "",
     }
 
 
-@lru_cache(maxsize=1)
+def sirket_oranlari_getir(hisse, force_refresh=False):
+    hisse = hisse.upper().strip()
+    if force_refresh:
+        html = get_html(COMPANY_CARD_URL.format(hisse=hisse), force_refresh=True)
+        table = find_ratio_table(read_tables(html))
+        if table is None:
+            raise ValueError(f"{hisse} şirket kartında gerçekleşen oran tablosu bulunamadı.")
+        row = find_stock_row(table, hisse)
+        if row is None:
+            raise ValueError(f"{hisse} şirket kartındaki oran tablosunda bulunamadı.")
+        def val(cands):
+            c = find_column(table.columns, cands)
+            return tr_float(row[c]) if c is not None else None
+        close = val(["Kapanış", "Kapanis"])
+        if close is None:
+            close = kapanis_fiyati_bul(read_tables(html), hisse)
+        return {
+            "fk": val(["F/K"]),
+            "fd_favok": val(["FD/FAVÖK", "FD/FAVOK"]),
+            "fd_satislar": val(["FD/Satışlar", "FD/Satislar"]),
+            "pddd": val(["PD/DD"]),
+            "kapanis": close,
+            "son_donem": str(row[find_column(table.columns, ["Son Dönem", "Son Donem"])]) if find_column(table.columns, ["Son Dönem", "Son Donem"]) is not None else "",
+        }
+    return _sirket_oranlari_cached(hisse, int(time.time() // 120))
+
+
+@lru_cache(maxsize=8)
 def sektor_option_map_getir():
     soup = BeautifulSoup(ana_sayfa_verileri()["html"], "html.parser")
     result = {}
@@ -216,14 +303,13 @@ def prim_iskonto_hesapla(sirket, sektor):
     return (sirket / sektor - 1) * 100
 
 
-@lru_cache(maxsize=256)
-def isyatirim_hisse_analizi(hisse):
+def isyatirim_hisse_analizi(hisse, force_refresh=False):
     hisse = hisse.upper().strip()
     meta = hisse_meta_getir(hisse)
-    company = sirket_oranlari_getir(hisse)
+    company = sirket_oranlari_getir(hisse, force_refresh=force_refresh)
     sektor_info = sektor_kodu_getir(meta["sektor"])
     sektor_url = BASE_URL + "?sektor=" + sektor_info["code"]
-    sector = parse_sector_average(get_html(sektor_url))
+    sector = parse_sector_average(get_html(sektor_url, ttl_seconds=300, force_refresh=force_refresh))
     discount = {k: prim_iskonto_hesapla(company.get(k), sector.get(k)) for k in ("fk", "fd_favok", "fd_satislar", "pddd")}
     return {
         "hisse": hisse,
@@ -234,6 +320,8 @@ def isyatirim_hisse_analizi(hisse):
         "company": company,
         "sector": sector,
         "prim_iskonto": discount,
+        "price": company.get("kapanis"),
+        "price_source": "İş Yatırım / Kapanış",
     }
 
 

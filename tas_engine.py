@@ -18,6 +18,7 @@
 
 
 import math
+import time
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -55,38 +56,34 @@ def fiyat_verisi_getir(
         hisse
     )
 
-    df = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
+    df = None
+    last_error = None
+    # Yahoo zaman zaman 429/HTTPError döndürüyor. Tek geçici hata bütün
+    # hisseyi düşürmesin; kontrollü retry + 2y fallback kullan.
+    for try_period in (period, "2y"):
+        for attempt in range(3):
+            try:
+                df = yf.download(
+                    ticker,
+                    period=try_period,
+                    interval="1d",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    timeout=20,
+                )
+                if df is not None and not df.empty:
+                    break
+            except Exception as exc:
+                last_error = exc
+            time.sleep(1.0 * (attempt + 1))
+        if df is not None and not df.empty:
+            break
 
-    if (
-        df is None
-        or df.empty
-    ):
-
-        # İlk deneme başarısızsa daha uzun dönem
-        df = yf.download(
-            ticker,
-            period="2y",
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-        )
-
-    if (
-        df is None
-        or df.empty
-    ):
-
-        raise ValueError(
-            f"{hisse} için fiyat verisi bulunamadı."
-        )
+    if df is None or df.empty:
+        if last_error is not None:
+            raise ValueError(f"{hisse} için teknik fiyat geçmişi alınamadı: {type(last_error).__name__}")
+        raise ValueError(f"{hisse} için fiyat verisi bulunamadı.")
 
 
     # ========================================================

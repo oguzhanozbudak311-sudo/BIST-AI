@@ -177,9 +177,11 @@ def kap_reports_for_year(ticker, year):
 def is_real_financial_report(item):
     if not isinstance(item, dict):
         return False
+    subject = normalize_text(item.get("subject"))
     return (
         str(item.get("disclosureClass") or "").upper() == "FR"
-        and normalize_text(item.get("subject")) == "finansal rapor"
+        and "finansal rapor" in subject
+        and "faaliyet raporu" not in subject
     )
 
 
@@ -200,10 +202,11 @@ PERIOD_PRIORITY = {"3 Aylık": 1, "6 Aylık": 2, "9 Aylık": 3, "Yıllık": 4}
 
 
 def select_current_and_previous_report(ticker):
-    """Cari raporu bul; yoksa en fazla 3 yil geriye giderek stale fallback kullan.
+    """En son yayımlanan gerçek finansal raporu seç.
 
-    Stale rapor skorlamada ayrica guvenlik kapisina tabidir. Buradaki amac
-    analizi tamamen cokertmeden en son bilinen finansali gosterebilmektir.
+    Takvim yılı varsayımı yapılmaz. KAYSE gibi özel hesap dönemli şirketlerde
+    rapor yılı bir önceki yıl görünebilir ancak bildirim günceldir. Bu yüzden
+    seçim disclosureIndex (yayın sırası) üzerinden yapılır.
     """
     ticker = ticker.upper().strip()
     today_year = date.today().year
@@ -218,35 +221,46 @@ def select_current_and_previous_report(ticker):
                 report_year = int(item.get("year"))
             except Exception:
                 continue
-            if report_year != year:
-                continue
+            # ``year`` burada raporun finansal dönem yılıdır; sorgunun tarih
+            # aralığı ise bildirim tarihidir. Özel hesap dönemli KAYSE gibi
+            # şirketlerde ikisi farklı olabilir. Bu yüzden eşitlik filtresi
+            # uygulanmaz; disclosureIndex ile en güncel gerçek rapor seçilir.
             rule = normalize_rule_type(item.get("ruleType"))
             if rule not in PERIOD_PRIORITY:
                 continue
             out.append({**item, "_year": report_year, "_rule_type": rule})
-        out.sort(
-            key=lambda x: (PERIOD_PRIORITY.get(x["_rule_type"], 0), int(x.get("disclosureIndex") or 0)),
-            reverse=True,
-        )
         return out
 
-    current_report = None
+    all_reports = []
     for year in range(today_year, today_year - 4, -1):
-        reports = _valid_reports(year)
-        if reports:
-            current_report = reports[0]
-            if year != today_year:
-                current_report = {**current_report, "_stale_fallback": True}
-            break
-    if current_report is None:
+        all_reports.extend(_valid_reports(year))
+
+    if not all_reports:
         raise ValueError(f"{ticker} icin kullanilabilir finansal rapor bulunamadi.")
+
+    # Aynı bildirim farklı sorgu pencerelerinde dönebilir; tekilleştir.
+    dedup = {}
+    for item in all_reports:
+        idx = int(item.get("disclosureIndex") or 0)
+        if idx:
+            dedup[idx] = item
+    all_reports = list(dedup.values())
+
+    # KAP bildirim numarası kronolojik olarak artar; en güncel gerçek raporu seç.
+    all_reports.sort(key=lambda x: int(x.get("disclosureIndex") or 0), reverse=True)
+    current_report = dict(all_reports[0])
+
+    # Özel hesap dönemli şirketleri yanlışlıkla "eski" sayma.
+    # Sadece rapor yılı iki takvim yılından daha gerideyse stale kabul et.
+    current_report["_stale_fallback"] = int(current_report["_year"]) < (today_year - 1)
 
     target_rule = current_report["_rule_type"]
     previous_target_year = int(current_report["_year"]) - 1
     previous_candidates = [
-        x for x in _valid_reports(previous_target_year)
-        if x["_rule_type"] == target_rule
+        x for x in all_reports
+        if int(x["_year"]) == previous_target_year and x["_rule_type"] == target_rule
     ]
+    previous_candidates.sort(key=lambda x: int(x.get("disclosureIndex") or 0), reverse=True)
     previous_report = previous_candidates[0] if previous_candidates else None
     return current_report, previous_report
 
@@ -389,40 +403,39 @@ def numeric_values_from_cell(text):
 
 
 def financial_values_from_row(row, label_index=0, scale=1):
-    """Etiket hücresinden sonraki cari/karşılaştırmalı dönem tutarlarını çıkarır.
+    """KAP satırından cari ve karşılaştırmalı dönem tutarlarını güvenli çıkarır.
 
-    KAP şablonlarında etiket bazen ilk hücrede, bazen taxonomy/role
-    hücrelerinden sonra gelir. Değerleri doğrudan etiketin sağından okumak,
-    THYAO'daki ``21`` gibi dipnot numaralarının cari dönem değeri sanılmasını
-    önler.
+    Kritik kural: KAP finansal tablo satırlarında metrik etiketinin sağında
+    taxonomy/rol/dipnot hücreleri bulunabilir. Bunlar 21, 4.170, 10,05 gibi
+    tamamen sayısal görünebildiği için büyüklük tahminiyle ayıklamak güvenilir
+    değildir. Dönem tutarları tablonun en sağındaki sayısal hücrelerdir.
+
+    Bu nedenle etiketten sonraki hücreler içinden *sağdan sola* sayısal hücre
+    seçilir ve en fazla iki dönem değeri alınır. Böylece SISE'deki 10,05 ve
+    TOASO'daki 4.170 dipnot referansları cari değer sanılmaz.
     """
     if not row:
         return []
 
-    cells = row[label_index + 1:]
-    cell_values = [numeric_values_from_cell(cell) for cell in cells]
+    numeric_cells = []
+    for cell in row[label_index + 1:]:
+        vals = numeric_values_from_cell(cell)
+        if vals:
+            # Finansal tablo hücresinin tek bir dönem tutarı içermesi beklenir.
+            # Hücre içinde birden çok sayı varsa en sağdaki/son parse edilen
+            # değer gerçek tutara en yakın adaydır.
+            numeric_cells.append(vals[-1])
 
-    # Boş hücreleri korumak yerine yalnızca sayısal hücreleri sırayla al.
-    nonempty = [vals for vals in cell_values if vals]
-    if not nonempty:
+    if not numeric_cells:
         return []
 
-    # Etiketten hemen sonraki hücre çoğu raporda dipnot referansıdır.
-    # Tek, küçük, tam sayı ve arkasında en az iki sayısal dönem hücresi varsa at.
-    first = nonempty[0]
-    if (
-        len(first) == 1
-        and abs(first[0]) <= 99
-        and float(first[0]).is_integer()
-        and len(nonempty) >= 3
-    ):
-        nonempty = nonempty[1:]
+    # KAP'ta dönem değerleri satırın en sağındadır. İki veya daha fazla
+    # sayısal hücre varsa dipnot/taxonomy sayılarını solda bırakıp yalnızca
+    # son iki hücreyi cari + karşılaştırmalı olarak kullan.
+    if len(numeric_cells) >= 2:
+        return numeric_cells[-2:]
 
-    values = []
-    for vals in nonempty:
-        values.extend(vals)
-
-    return values
+    return numeric_cells
 
 
 METRIC_RULES = {
@@ -435,12 +448,22 @@ METRIC_RULES = {
         "excludes": [],
     },
     "net_kar": {
-        "aliases": ["Net Dönem Kârı (Zararı)", "Net Donem Kari (Zarari)", "Dönem Kârı (Zararı)", "Donem Kari (Zarari)"],
+        "aliases": [
+            "Net Dönem Kârı (Zararı)", "Net Donem Kari (Zarari)",
+            "Dönem Kârı (Zararı)", "Donem Kari (Zarari)",
+            "Dönem Net Kârı (Zararı)", "Donem Net Kari (Zarari)",
+            "Sürdürülen Faaliyetler Dönem Kârı (Zararı)", "Surdurulen Faaliyetler Donem Kari (Zarari)"
+        ],
         "excludes": ["Ana Ortaklık Payları", "Ana Ortaklik Paylari"],
     },
     "faaliyet_kari": {
-        "aliases": ["Esas Faaliyet Kârı (Zararı)", "Esas Faaliyet Kari (Zarari)", "Faaliyet Kârı (Zararı)", "Faaliyet Kari (Zarari)"],
-        "excludes": ["Finansman", "Vergi Öncesi"],
+        "aliases": [
+            "Esas Faaliyet Kârı (Zararı)", "Esas Faaliyet Kari (Zarari)",
+            "Faaliyet Kârı (Zararı)", "Faaliyet Kari (Zarari)",
+            "Esas Faaliyetlerden Kâr (Zarar)", "Esas Faaliyetlerden Kar (Zarar)",
+            "Faaliyetlerden Kâr (Zarar)", "Faaliyetlerden Kar (Zarar)"
+        ],
+        "excludes": ["Finansman Gideri Öncesi", "Vergi Öncesi"],
     },
     "nakit": {
         "aliases": ["Nakit ve Nakit Benzerleri", "Nakit ve Nakit Benzeri"],

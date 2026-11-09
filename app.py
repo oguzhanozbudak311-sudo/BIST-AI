@@ -1,9 +1,11 @@
 import pandas as pd
+import time
 import streamlit as st
 
 from fss_v3_engine import fss_v3_hesapla
 from tas_engine import tas_hesapla
 from universe import HISSELER, evren_kontrolu
+from isyatirim_engine import isyatirim_hisse_analizi
 
 st.set_page_config(page_title="BİST AI- Oğuzhan Özbudak", page_icon="📊", layout="wide")
 
@@ -68,6 +70,90 @@ st.markdown(
 )
 
 
+
+def skor_bandi(v):
+    if v is None: return "Veri Yok"
+    if v < 40: return "0-39,9 | Kırmızı"
+    if v <= 70: return "40-70 | Sarı"
+    return "70+ | Yeşil"
+
+def _ranking_style(df):
+    def paint(v):
+        if pd.isna(v): return ""
+        return f"color: {score_color(float(v))}; font-weight: 700;"
+    return df.style.map(paint, subset=["Genel Skor","FSS","TAS"]).format(
+        {"Genel Skor":"{:.1f}","FSS":"{:.1f}","TAS":"{:.1f}","Son Fiyat":"{:.2f}"}
+    )
+
+def toplu_siralama_hesapla():
+    rows=[]
+    bar=st.progress(0, text="50 hisse taranıyor...")
+    status=st.empty()
+    for i,kod in enumerate(HISSELER,1):
+        status.caption(f"{i}/50 — {kod} analiz ediliyor")
+        f=t=None
+        f_err=t_err=None
+
+        # FSS ve TAS bağımsız çalışsın; bir kaynak hatası tüm satırı düşürmesin.
+        try:
+            f=fss_v3_hesapla(kod)
+        except Exception as exc:
+            f_err=f"{type(exc).__name__}: {exc}"
+
+        try:
+            t=tas_hesapla(kod)
+        except Exception as exc:
+            t_err=f"{type(exc).__name__}: {exc}"
+
+        fs=f.get("FSS_V3") if f else None
+        ts=t.get("TAS") if t else None
+        gs=None if fs is None or ts is None else fs*.60+ts*.40
+
+        # Görünen son fiyatın birincil kaynağı İş Yatırım kapanışıdır.
+        iy_price=None
+        try:
+            if f and f.get("isyatirim"):
+                iy_price=(f["isyatirim"].get("company") or {}).get("kapanis")
+            if iy_price is None:
+                iy_price=isyatirim_hisse_analizi(kod, force_refresh=True).get("price")
+        except Exception:
+            pass
+
+        price = iy_price if iy_price is not None else (t.get("Price") if t else None)
+        price_source = "İş Yatırım" if iy_price is not None else ("Yahoo/TAS fallback" if price is not None else "-")
+
+        if gs is not None:
+            durum="Geçerli"
+        elif f and not f.get("score_usable", True):
+            reason=f.get("score_gate_reason")
+            durum={"stale_financials":"Eski Veri",
+                   "critical_financial_data_quality":"Veri Kalite Kapısı",
+                   "critical_quality_factor_missing":"Finansal Kalite Eksik"}.get(reason, f.get("etiket","FSS geçersiz"))
+        elif f_err:
+            durum="FSS Hata"
+        elif t_err:
+            durum="TAS Hata"
+        else:
+            durum="Eksik"
+
+        rows.append({
+            "Hisse":kod,
+            "Genel Skor":None if gs is None else round(gs,1),
+            "FSS":None if fs is None else round(fs,1),
+            "TAS":None if ts is None else round(ts,1),
+            "Son Fiyat":price,
+            "Fiyat Kaynağı":price_source,
+            "Durum":durum,
+            "FSS Hata":f_err,
+            "TAS Hata":t_err,
+        })
+        bar.progress(i/len(HISSELER), text=f"{i}/50 tamamlandı")
+        # Kaynakları gereksiz yere sıkıştırma.
+        time.sleep(0.20)
+
+    status.empty(); bar.empty()
+    return pd.DataFrame(rows)
+
 def nd_favok_source_label(src):
     if src == "kap_yilliklandirilmis_favok_yaklasimi":
         return "KAP faaliyet kârı + amortisman/itfa üzerinden yıllıklandırılmış FAVÖK yaklaşımı"
@@ -81,141 +167,176 @@ hisse = st.sidebar.selectbox("Hisse", HISSELER, index=HISSELER.index("TUPRS"))
 st.sidebar.caption("Genel skor: %60 FSS + %40 TAS")
 st.sidebar.success("50 Hisselik evren aktif.")
 
-if st.button(f"🚀 {hisse} Analizini Çalıştır", use_container_width=True):
-    try:
-        with st.spinner("KAP, İş Yatırım ve teknik veriler hazırlanıyor..."):
-            fss = fss_v3_hesapla(hisse)
-            tas = tas_hesapla(hisse)
+tab_analiz, tab_siralama = st.tabs(["📊 Tek Hisse Analizi", "🔒 50 Hisse Sıralaması"])
 
-        fss_score = fss.get("FSS_V3")
-        tas_score = tas.get("TAS")
-        genel = None if fss_score is None or tas_score is None else fss_score * .60 + tas_score * .40
+with tab_analiz:
+    if st.button(f"🚀 {hisse} Analizini Çalıştır", use_container_width=True):
+        try:
+            with st.spinner("KAP, İş Yatırım ve teknik veriler hazırlanıyor..."):
+                fss = fss_v3_hesapla(hisse)
+                tas = tas_hesapla(hisse)
 
-        c1,c2,c3,c4 = st.columns(4)
-        with c1:
-            score_metric("GENEL SKOR", genel)
-        with c2:
-            score_metric("Finansal Sağlık Skoru", fss_score)
-        with c3:
-            score_metric("Teknik Analiz Skoru", tas_score)
-        c4.metric("Son Fiyat", "-" if tas.get("Price") is None else f"{tas['Price']:.2f} TL")
+            fss_score = fss.get("FSS_V3")
+            tas_score = tas.get("TAS")
+            genel = None if fss_score is None or tas_score is None else fss_score * .60 + tas_score * .40
 
-        st.subheader("FSS Ana Faktörler")
-        f1,f2,f3,f4 = st.columns(4)
-        f1.metric("Değerleme", score(fss.get("valuation_score")))
-        f2.metric("Kalite", score(fss.get("quality_score")))
-        f3.metric("Büyüme", score(fss.get("growth_score")))
-        f4.metric("Finansal Sağlık", score(fss.get("financial_health_score")))
-        st.caption(f"FSS etiketi: {fss.get('etiket')} | Veri tamamlanma: %{fss.get('tamamlanma',0):.0f}")
-        if not fss.get("score_usable", True):
-            raw = fss.get("FSS_V3_RAW")
-            reason = fss.get("score_gate_reason")
-            if reason == "stale_financials":
-                st.error("⛔ FSS güvenlik kapısı aktif: Finansal rapor güncel değil. Ham FSS yalnızca inceleme amaçlıdır; Genel Skor hesabına dahil edilmedi.")
+            c1,c2,c3,c4 = st.columns(4)
+            with c1:
+                score_metric("GENEL SKOR", genel)
+            with c2:
+                score_metric("Finansal Sağlık Skoru", fss_score)
+            with c3:
+                score_metric("Teknik Analiz Skoru", tas_score)
+
+            iy_price = (fss.get("isyatirim", {}).get("company", {}) or {}).get("kapanis")
+            shown_price = iy_price if iy_price is not None else tas.get("Price")
+            c4.metric("Son Fiyat", "-" if shown_price is None else f"{shown_price:.2f} TL")
+            st.caption("Fiyat kaynağı: İş Yatırım kapanış" if iy_price is not None else "Fiyat kaynağı: Yahoo/TAS fallback")
+
+            st.subheader("FSS Ana Faktörler")
+            f1,f2,f3,f4 = st.columns(4)
+            f1.metric("Değerleme", score(fss.get("valuation_score")))
+            f2.metric("Kalite", score(fss.get("quality_score")))
+            f3.metric("Büyüme", score(fss.get("growth_score")))
+            f4.metric("Finansal Sağlık", score(fss.get("financial_health_score")))
+            st.caption(f"FSS etiketi: {fss.get('etiket')} | Veri tamamlanma: %{fss.get('tamamlanma',0):.0f}")
+            if not fss.get("score_usable", True):
+                raw = fss.get("FSS_V3_RAW")
+                reason = fss.get("score_gate_reason")
+                if reason == "stale_financials":
+                    st.error("⛔ FSS güvenlik kapısı aktif: Finansal rapor güncel değil. Ham FSS yalnızca inceleme amaçlıdır; Genel Skor hesabına dahil edilmedi.")
+                else:
+                    st.error("⛔ FSS güvenlik kapısı aktif: Kritik KAP satır/ölçek anomalisi tespit edildi. Finansal skor ve Genel Skor geçersiz sayıldı.")
+                if raw is not None:
+                    st.caption(f"Ham FSS (karar skoruna dahil edilmez): {raw:.1f}/100")
+            if fss.get("valuation_coverage", 100) < 100:
+                st.info(f"Değerleme veri kapsamı: %{fss.get('valuation_coverage',0):.0f}. Eksik çarpanlar nedeniyle değerleme skoru güvenlik tavanına tabi.")
+            for issue in fss.get("kap", {}).get("data_quality_issues", []):
+                st.warning("⚠️ Veri kalite kontrolü: " + issue)
+            if fss.get("kap", {}).get("stale_fallback"):
+                st.warning("⚠️ Cari yıl finansal raporu bulunamadı; en güncel kullanılabilir KAP raporu gösteriliyor. Dönem etiketi ve veri tarihi mutlaka kontrol edilmeli.")
+
+            risk = fss.get("value_trap_risk")
+            if risk == "Yüksek":
+                st.error(f"⚠️ Value-trap riski: YÜKSEK — {fss.get('value_trap_note')}")
+            elif risk == "Orta":
+                st.warning(f"⚠️ Value-trap riski: ORTA — {fss.get('value_trap_note')}")
+
+            st.subheader("Değerleme – İş Yatırım sektör karşılaştırması")
+            st.caption(
+                f"Sektör profili: {fss.get('valuation_profile')} | "
+                f"Ağırlıklar: F/K %{fss['valuation_weights']['fk']*100:.0f}, "
+                f"FD/FAVÖK %{fss['valuation_weights']['fd_favok']*100:.0f}, "
+                f"PD/DD %{fss['valuation_weights']['pddd']*100:.0f}, "
+                f"FD/Satış %{fss['valuation_weights']['fd_satislar']*100:.0f}"
+            )
+            rows = [
+                ["F/K", xx(fss.get("fk")), xx(fss.get("sector_fk")), pct(fss.get("fk_discount")), score(fss.get("fk_score"))],
+                ["FD/FAVÖK", xx(fss.get("fd_favok")), xx(fss.get("sector_fd_favok")), pct(fss.get("fd_favok_discount")), score(fss.get("fd_favok_score"))],
+                ["PD/DD", xx(fss.get("pddd")), xx(fss.get("sector_pddd")), pct(fss.get("pddd_discount")), score(fss.get("pddd_score"))],
+            ]
+            if fss["valuation_weights"].get("fd_satislar", 0) > 0:
+                rows.append(["FD/Satış", xx(fss.get("fd_satislar")), xx(fss.get("sector_fd_satislar")), pct(fss.get("fd_satislar_discount")), score(fss.get("fd_satislar_score"))])
+            st.dataframe(pd.DataFrame(rows, columns=["Metrik","Şirket","Sektör","Prim/İskonto","Skor"]), width="stretch", hide_index=True)
+
+            kap = fss["kap"]
+            cur = kap["current"]
+            comp = kap["comparison"]
+            prev = kap["previous_same"]
+
+            st.subheader("KAP finansalları")
+            k1,k2,k3,k4 = st.columns(4)
+            k1.metric("Hasılat", para(cur.get("hasilat")))
+            k2.metric("Net Kâr", para(cur.get("net_kar")))
+            k3.metric("Faaliyet Kârı", para(cur.get("faaliyet_kari")))
+            k4.metric("Özkaynak", para(cur.get("ozkaynak")))
+
+            st.caption(
+                f"Cari KAP: {kap.get('current_year')} {kap.get('current_period')} / Bildirim {kap.get('bildirim_id')} | "
+                "Akış karşılaştırmaları cari raporun kendi karşılaştırmalı sütunundan alınır; ikinci TÜFE düzeltmesi uygulanmaz."
+            )
+
+            growth_df = pd.DataFrame([
+                ["Hasılat", para(cur.get("hasilat")), para(comp.get("hasilat")), pct(fss.get("hasilat_degisim")), score(fss.get("hasilat_degisim_score"))],
+                ["Faaliyet Kârı", para(cur.get("faaliyet_kari")), para(comp.get("faaliyet_kari")), "-", score(fss.get("faaliyet_buyume_score"))],
+                ["Net Kâr", para(cur.get("net_kar")), para(comp.get("net_kar")), "-", score(fss.get("net_kar_buyume_score"))],
+            ], columns=["Metrik","Cari","Karşılaştırmalı","Değişim","Skor"])
+            st.dataframe(growth_df, width="stretch", hide_index=True)
+
+            q1,q2,q3,q4 = st.columns(4)
+            q1.metric("ROE (H1 yıllıklandırılmış)", pct(fss.get("roe")))
+            q2.metric("Faaliyet Marjı", pct(fss.get("faaliyet_marji")))
+            q3.metric("Net Borç / Özkaynak", xx(fss.get("net_borc_ozkaynak")))
+            q4.metric("Net Borç / FAVÖK", xx(fss.get("net_borc_favok")))
+            st.caption("Net Borç/FAVÖK kaynağı: " + nd_favok_source_label(fss.get("net_borc_favok_source")))
+
+            with st.expander("Borç ve FAVÖK detayı"):
+                debt_df = pd.DataFrame([
+                    ["Nakit", para(cur.get("nakit"))],
+                    ["Kısa vadeli borçlanmalar", para(cur.get("kv_borc"))],
+                    ["UV borcun kısa kısmı", para(cur.get("uv_kisa"))],
+                    ["Uzun vadeli borçlanmalar", para(cur.get("uv_borc"))],
+                    ["Finansal borç", para(kap.get("finansal_borc"))],
+                    ["Net borç", para(kap.get("net_borc"))],
+                    ["Amortisman/itfa (KAP, varsa)", para(cur.get("amortisman_itfa"))],
+                    ["Önceki aynı dönem özkaynak", para((prev or {}).get("ozkaynak"))],
+                ], columns=["Kalem","Değer"])
+                st.dataframe(debt_df, width="stretch", hide_index=True)
+
+            st.subheader("Teknik analiz – TAS V2")
+            t1,t2,t3,t4,t5 = st.columns(5)
+            t1.metric("TAS", f"{tas_score:.1f}/100")
+            t2.metric("Destek", "-" if tas.get("Destek") is None else f"{tas['Destek']:.2f} TL")
+            t3.metric("Direnç", "-" if tas.get("Direnc") is None else f"{tas['Direnc']:.2f} TL")
+            t4.metric("RSI(14)", "-" if tas.get("RSI14") is None else f"{tas['RSI14']:.1f}")
+            t5.metric("Risk/Reward", "-" if tas.get("RiskReward") is None else f"{tas['RiskReward']:.2f}")
+            rr = tas.get("RiskReward")
+            if rr is not None and rr < 0.25 and tas_score >= 65:
+                st.warning("⚠️ TAS yüksek olsa da fiyat mevcut dirence çok yakın; Risk/Reward çok düşük.")
+            elif rr is not None and rr >= 5 and tas_score < 55:
+                st.info("ℹ️ Risk/Reward yüksek, ancak TAS zayıf. Destek yakınlığı tek başına teknik teyit değildir.")
+
+            with st.expander("Teknik detay"):
+                td = pd.DataFrame([
+                    ["MA20", tas.get("MA20")], ["MA50", tas.get("MA50")], ["MA200", tas.get("MA200")],
+                    ["RSI14", tas.get("RSI14")], ["RVOL20", tas.get("RVOL20")], ["NATR14", tas.get("NATR14")],
+                    ["Trend", tas.get("Trend")],
+                ], columns=["Gösterge","Değer"])
+                st.dataframe(td, width="stretch", hide_index=True)
+
+            if fss.get("score_usable", True):
+                st.success("✅ KAP + İş Yatırım + FSS V3.1.3 + TAS V2 zinciri tamamlandı.")
             else:
-                st.error("⛔ FSS güvenlik kapısı aktif: Kritik KAP satır/ölçek anomalisi tespit edildi. Finansal skor ve Genel Skor geçersiz sayıldı.")
-            if raw is not None:
-                st.caption(f"Ham FSS (karar skoruna dahil edilmez): {raw:.1f}/100")
-        if fss.get("valuation_coverage", 100) < 100:
-            st.info(f"Değerleme veri kapsamı: %{fss.get('valuation_coverage',0):.0f}. Eksik çarpanlar nedeniyle değerleme skoru güvenlik tavanına tabi.")
-        for issue in fss.get("kap", {}).get("data_quality_issues", []):
-            st.warning("⚠️ Veri kalite kontrolü: " + issue)
-        if fss.get("kap", {}).get("stale_fallback"):
-            st.warning("⚠️ Cari yıl finansal raporu bulunamadı; en güncel kullanılabilir KAP raporu gösteriliyor. Dönem etiketi ve veri tarihi mutlaka kontrol edilmeli.")
+                st.info("ℹ️ Veri zinciri tamamlandı; ancak FSS güvenlik kapısı nedeniyle Genel Skor üretilmedi.")
+            st.caption("Bu panel karar destek aracıdır; otomatik al/sat sistemi değildir.")
 
-        risk = fss.get("value_trap_risk")
-        if risk == "Yüksek":
-            st.error(f"⚠️ Value-trap riski: YÜKSEK — {fss.get('value_trap_note')}")
-        elif risk == "Orta":
-            st.warning(f"⚠️ Value-trap riski: ORTA — {fss.get('value_trap_note')}")
+        except Exception as e:
+            st.error(f"Analiz sırasında hata oluştu: {type(e).__name__}: {e}")
 
-        st.subheader("Değerleme – İş Yatırım sektör karşılaştırması")
-        st.caption(
-            f"Sektör profili: {fss.get('valuation_profile')} | "
-            f"Ağırlıklar: F/K %{fss['valuation_weights']['fk']*100:.0f}, "
-            f"FD/FAVÖK %{fss['valuation_weights']['fd_favok']*100:.0f}, "
-            f"PD/DD %{fss['valuation_weights']['pddd']*100:.0f}, "
-            f"FD/Satış %{fss['valuation_weights']['fd_satislar']*100:.0f}"
-        )
-        rows = [
-            ["F/K", xx(fss.get("fk")), xx(fss.get("sector_fk")), pct(fss.get("fk_discount")), score(fss.get("fk_score"))],
-            ["FD/FAVÖK", xx(fss.get("fd_favok")), xx(fss.get("sector_fd_favok")), pct(fss.get("fd_favok_discount")), score(fss.get("fd_favok_score"))],
-            ["PD/DD", xx(fss.get("pddd")), xx(fss.get("sector_pddd")), pct(fss.get("pddd_discount")), score(fss.get("pddd_score"))],
-        ]
-        if fss["valuation_weights"].get("fd_satislar", 0) > 0:
-            rows.append(["FD/Satış", xx(fss.get("fd_satislar")), xx(fss.get("sector_fd_satislar")), pct(fss.get("fd_satislar_discount")), score(fss.get("fd_satislar_score"))])
-        st.dataframe(pd.DataFrame(rows, columns=["Metrik","Şirket","Sektör","Prim/İskonto","Skor"]), width="stretch", hide_index=True)
+with tab_siralama:
+    st.subheader("🔒 50 Hisse Sıralaması")
+    st.caption("Private Research — şimdilik model doğrulama ve araştırma amacıyla kullanılır.")
+    a,b=st.columns([2,1])
+    with a:
+        olcut=st.selectbox("Sıralama ölçütü",["Genel Skor","FSS","TAS"],key="ranking_metric")
+    with b:
+        bant=st.selectbox("Puan aralığı",["Tümü","70+ | Yeşil","40-70 | Sarı","0-39,9 | Kırmızı"],key="ranking_band")
+    st.info("Tarama 50 hissenin KAP + İş Yatırım + TAS motorlarını canlı çalıştırır; ilk tarama birkaç dakika sürebilir.")
+    if st.button("🔄 50 Hisseyi Tara / Güncelle",use_container_width=True,key="scan_50"):
+        st.session_state["ranking_df"]=toplu_siralama_hesapla()
+    df=st.session_state.get("ranking_df")
+    if df is None:
+        st.caption("Henüz toplu tarama yapılmadı.")
+    else:
+        w=df.copy(); w["Puan Bandı"]=w[olcut].apply(skor_bandi)
+        if bant!="Tümü": w=w[w["Puan Bandı"]==bant]
+        w=w.sort_values(olcut,ascending=False,na_position="last").reset_index(drop=True)
+        w.insert(0,"Sıra",range(1,len(w)+1))
+        c1,c2,c3=st.columns(3)
+        c1.metric("Geçerli skor",f"{int(df[olcut].notna().sum())}/50")
+        c2.metric("70+ hisse",int((df[olcut]>70).sum()))
+        c3.metric("40 altı hisse",int((df[olcut]<40).sum()))
+        shown=w[["Sıra","Hisse","Genel Skor","FSS","TAS","Son Fiyat","Fiyat Kaynağı","Durum"]]
+        st.dataframe(_ranking_style(shown),width="stretch",hide_index=True,height=900)
+        st.caption("Renk eşikleri: 40 altı kırmızı, 40-70 sarı, 70 üzeri yeşil. Güvenlik kapısı aktif hisseler geçerli Genel Skor üretmez.")
 
-        kap = fss["kap"]
-        cur = kap["current"]
-        comp = kap["comparison"]
-        prev = kap["previous_same"]
-
-        st.subheader("KAP finansalları")
-        k1,k2,k3,k4 = st.columns(4)
-        k1.metric("Hasılat", para(cur.get("hasilat")))
-        k2.metric("Net Kâr", para(cur.get("net_kar")))
-        k3.metric("Faaliyet Kârı", para(cur.get("faaliyet_kari")))
-        k4.metric("Özkaynak", para(cur.get("ozkaynak")))
-
-        st.caption(
-            f"Cari KAP: {kap.get('current_year')} {kap.get('current_period')} / Bildirim {kap.get('bildirim_id')} | "
-            "Akış karşılaştırmaları cari raporun kendi karşılaştırmalı sütunundan alınır; ikinci TÜFE düzeltmesi uygulanmaz."
-        )
-
-        growth_df = pd.DataFrame([
-            ["Hasılat", para(cur.get("hasilat")), para(comp.get("hasilat")), pct(fss.get("hasilat_degisim")), score(fss.get("hasilat_degisim_score"))],
-            ["Faaliyet Kârı", para(cur.get("faaliyet_kari")), para(comp.get("faaliyet_kari")), "-", score(fss.get("faaliyet_buyume_score"))],
-            ["Net Kâr", para(cur.get("net_kar")), para(comp.get("net_kar")), "-", score(fss.get("net_kar_buyume_score"))],
-        ], columns=["Metrik","Cari","Karşılaştırmalı","Değişim","Skor"])
-        st.dataframe(growth_df, width="stretch", hide_index=True)
-
-        q1,q2,q3,q4 = st.columns(4)
-        q1.metric("ROE (H1 yıllıklandırılmış)", pct(fss.get("roe")))
-        q2.metric("Faaliyet Marjı", pct(fss.get("faaliyet_marji")))
-        q3.metric("Net Borç / Özkaynak", xx(fss.get("net_borc_ozkaynak")))
-        q4.metric("Net Borç / FAVÖK", xx(fss.get("net_borc_favok")))
-        st.caption("Net Borç/FAVÖK kaynağı: " + nd_favok_source_label(fss.get("net_borc_favok_source")))
-
-        with st.expander("Borç ve FAVÖK detayı"):
-            debt_df = pd.DataFrame([
-                ["Nakit", para(cur.get("nakit"))],
-                ["Kısa vadeli borçlanmalar", para(cur.get("kv_borc"))],
-                ["UV borcun kısa kısmı", para(cur.get("uv_kisa"))],
-                ["Uzun vadeli borçlanmalar", para(cur.get("uv_borc"))],
-                ["Finansal borç", para(kap.get("finansal_borc"))],
-                ["Net borç", para(kap.get("net_borc"))],
-                ["Amortisman/itfa (KAP, varsa)", para(cur.get("amortisman_itfa"))],
-                ["Önceki aynı dönem özkaynak", para((prev or {}).get("ozkaynak"))],
-            ], columns=["Kalem","Değer"])
-            st.dataframe(debt_df, width="stretch", hide_index=True)
-
-        st.subheader("Teknik analiz – TAS V2")
-        t1,t2,t3,t4,t5 = st.columns(5)
-        t1.metric("TAS", f"{tas_score:.1f}/100")
-        t2.metric("Destek", "-" if tas.get("Destek") is None else f"{tas['Destek']:.2f} TL")
-        t3.metric("Direnç", "-" if tas.get("Direnc") is None else f"{tas['Direnc']:.2f} TL")
-        t4.metric("RSI(14)", "-" if tas.get("RSI14") is None else f"{tas['RSI14']:.1f}")
-        t5.metric("Risk/Reward", "-" if tas.get("RiskReward") is None else f"{tas['RiskReward']:.2f}")
-        rr = tas.get("RiskReward")
-        if rr is not None and rr < 0.25 and tas_score >= 65:
-            st.warning("⚠️ TAS yüksek olsa da fiyat mevcut dirence çok yakın; Risk/Reward çok düşük.")
-        elif rr is not None and rr >= 5 and tas_score < 55:
-            st.info("ℹ️ Risk/Reward yüksek, ancak TAS zayıf. Destek yakınlığı tek başına teknik teyit değildir.")
-
-        with st.expander("Teknik detay"):
-            td = pd.DataFrame([
-                ["MA20", tas.get("MA20")], ["MA50", tas.get("MA50")], ["MA200", tas.get("MA200")],
-                ["RSI14", tas.get("RSI14")], ["RVOL20", tas.get("RVOL20")], ["NATR14", tas.get("NATR14")],
-                ["Trend", tas.get("Trend")],
-            ], columns=["Gösterge","Değer"])
-            st.dataframe(td, width="stretch", hide_index=True)
-
-        if fss.get("score_usable", True):
-            st.success("✅ KAP + İş Yatırım + FSS V3.1.3 + TAS V2 zinciri tamamlandı.")
-        else:
-            st.info("ℹ️ Veri zinciri tamamlandı; ancak FSS güvenlik kapısı nedeniyle Genel Skor üretilmedi.")
-        st.caption("Bu panel karar destek aracıdır; otomatik al/sat sistemi değildir.")
-
-    except Exception as e:
-        st.error(f"Analiz sırasında hata oluştu: {type(e).__name__}: {e}")
